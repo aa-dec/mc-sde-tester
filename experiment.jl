@@ -21,9 +21,9 @@ function noise(u, p, t)
     return SA[du1, du2]
 end
 
-n_traj = 1000
-T_end = 1000.0f0
-burnin = 5.0f0
+n_traj = 100
+T_end = 100.0f0
+burnin_time = 5.0f0
 dt::Float32     = 0.1f0
 dim = 2
 fname ="linear-ou.dat"
@@ -32,7 +32,8 @@ experiment = SDEExperiment(
     drift,
     noise,
     p; 
-    n_traj=n_traj, T_end=T_end, burnin=burnin, dt=dt, dim=dim, fname=fname
+    n_traj=n_traj, T_end=T_end, dt=dt, dim=dim, fname=fname
 )
-run_experiment(experiment)
+inits = burnin(experiment, burnin_time)
+run_experiment(experiment, inits)
 

@@ -9,7 +9,7 @@ include("models/Rotate.jl")
 using .LinearSDE
 using .RotateSDE
 
-export SDEExperiment, run_experiment, linear_drift, linear_noise
+export SDEExperiment, run_experiment, linear_drift, linear_noise, burnin
 
 Base.@kwdef struct SDEExperiment{D, N, P}
     drift::D 
@@ -17,11 +17,10 @@ Base.@kwdef struct SDEExperiment{D, N, P}
     params::P 
     n_traj::Int     = 100
     T_end::Float32  = 1000.0f0
-    burnin::Float32 = 50.0f0
     dt::Float32     = 0.01f0
     dim::Int
     seed::Int     =1234
-    fname::String   ="experiment.dat"
+    fname::Union{String, Nothing}   =nothing
 end
 
 #pretty printing
@@ -32,7 +31,6 @@ function Base.show(io::IO, ::MIME"text/plain", ex::SDEExperiment)
     @printf(io, "  %-15s : %dD\n", "Dimensions", ex.dim)
     @printf(io, "  %-15s : %d\n", "Trajectories", ex.n_traj)
     @printf(io, "  %-15s : %.2f (dt: %.3f)\n", "Time End", ex.T_end, ex.dt)
-    @printf(io, "  %-15s : %.2f\n", "Burn-in", ex.burnin)
     @printf(io, "  %-15s : %d\n", "Seed", ex.seed)
     println(io, "──────────────────────────────────────────────────────────")
     println(io, "  Parameters Type: ", typeof(ex.params))
@@ -49,8 +47,7 @@ function SDEExperiment(drift, noise, params; dim, kwargs...)
     return SDEExperiment(; drift=drift, noise=noise, params=params, dim=dim, kwargs...)
 end
 
-function run_experiment(sde_exp::SDEExperiment)
-
+function burnin(sde_exp::SDEExperiment, burnin_time)
     display(sde_exp)
     CUDA.allowscalar(false)
     
@@ -58,30 +55,41 @@ function run_experiment(sde_exp::SDEExperiment)
     @info "Starting Burn-in Phase" details="""
     Gathering an ensemble of initial conditions 
     distributed according to the invariant measure.
-    """ burnin_time=sde_exp.burnin
+    """ burnin_time=burnin_time
     
 
     u0 = rand(SVector{sde_exp.dim, Float32})
-    prob = SDEProblem(sde_exp.drift, sde_exp.noise, u0, (0.0f0, sde_exp.burnin), sde_exp.params)
+    prob = SDEProblem(sde_exp.drift, sde_exp.noise, u0, (0.0f0, burnin_time), sde_exp.params)
     ensemble_prob = EnsembleProblem(prob, 
-        prob_func = (prob, i, repeat) -> remake(prob; u0 = rand(SVector{sde_exp.dim, Float32}) ))
+        prob_func = (prob, ctx) -> 
+            remake(prob; u0 = rand(SVector{sde_exp.dim, Float32})),
+            output_func = (sol, ctx) -> (sol.u[end], false) 
+    )
 
     time_0 = time()
     sol = solve(ensemble_prob, SOSRI(), EnsembleGPUArray(CUDA.CUDABackend()), 
         trajectories = sde_exp.n_traj)
     # Initial conditions roughly distributed according to the invariant measures
-    inits = [s.u[end] for s in sol]
     time_elapsed = time() - time_0 
     @info "Time taken on burnin: " time=time_elapsed
+    cpu_data = sol.u
+
+    return cpu_data
+end
+
+function run_experiment(sde_exp::SDEExperiment, inits)
+
+    display(sde_exp)
+    CUDA.allowscalar(false)
 
     # Generate trajectories
     @info "Generating Data" details="""
     Simulating an ensemble of trajectories.
     """ end_time=sde_exp.T_end dt=sde_exp.dt
 
-    prob = SDEProblem(sde_exp.drift, sde_exp.noise, u0, (0.0f0, sde_exp.T_end), sde_exp.params)
-    ensemble_prob = EnsembleProblem(prob, 
-        prob_func = (prob, i, repeat) -> remake(prob; u0 = inits[i] ))
+    prob = SDEProblem(sde_exp.drift, sde_exp.noise, inits[1], (0.0f0, sde_exp.T_end), sde_exp.params)
+    prob_func = (prob, ctx) -> remake(prob, u0 = inits[ctx.sim_id])
+    ensemble_prob = EnsembleProblem(prob, prob_func = prob_func)
     
     time_0 = time()
     sol = solve(ensemble_prob, SOSRI(), EnsembleGPUArray(CUDA.CUDABackend()), 
@@ -92,17 +100,20 @@ function run_experiment(sde_exp::SDEExperiment)
     date_time = now()
     save_dir = joinpath(pwd(), "data")
     mkpath(save_dir)
-    filename=joinpath(save_dir, sde_exp.fname)
+    cpu_data = sol.u 
 
-    @info "Saving data" details="""
-    Date = $(date_time)
-    Filename = $(filename)
-    """ date_time=date_time filename=sde_exp.fname
+    if !isnothing(sde_exp.fname)
+        filename=joinpath(save_dir, sde_exp.fname)
 
-    cpu_data = Array.(sol.u)
-    timesteps = sol[1].t
-    jldsave(filename; sde_exp, cpu_data, timesteps)
+        @info "Saving data" details="""
+        Date = $(date_time)
+        Filename = $(filename)
+        """ date_time=date_time filename=sde_exp.fname
+        timesteps = collect(0.0f0:sde_exp.dt:sde_exp.T_end)
+        jldsave(filename; sde_exp, cpu_data, timesteps)
+    end
 
+    return cpu_data
 end
 
 

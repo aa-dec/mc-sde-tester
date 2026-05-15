@@ -1,0 +1,116 @@
+        - module Simulator
+        - 
+        - using DiffEqGPU, CUDA, StochasticDiffEq, StaticArrays
+        - using JLD2, Printf, Dates
+        - 
+        - include("models/Linear.jl")
+        - include("models/Rotate.jl")
+        - 
+        - using .LinearSDE
+        - using .RotateSDE
+        - 
+        - export SDEExperiment, run_experiment, linear_drift, linear_noise
+        - 
+        0 Base.@kwdef struct SDEExperiment{D, N, P}
+        -     drift::D 
+        -     noise::N 
+        -     params::P 
+        -     n_traj::Int     = 100
+        -     T_end::Float32  = 1000.0f0
+        -     burnin::Float32 = 50.0f0
+        -     dt::Float32     = 0.01f0
+        -     dim::Int
+        -     seed::Int     =1234
+        -     fname::Union{String, Nothing}   =nothing
+        - end
+        - 
+        - #pretty printing
+        - function Base.show(io::IO, ::MIME"text/plain", ex::SDEExperiment)
+      160     println(io, "──────────────────────────────────────────────────────────")
+      160     println(io, "SDE Markov Simulation")
+      160     println(io, "──────────────────────────────────────────────────────────")
+        0     @printf(io, "  %-15s : %dD\n", "Dimensions", ex.dim)
+        0     @printf(io, "  %-15s : %d\n", "Trajectories", ex.n_traj)
+      320     @printf(io, "  %-15s : %.2f (dt: %.3f)\n", "Time End", ex.T_end, ex.dt)
+        0     @printf(io, "  %-15s : %.2f\n", "Burn-in", ex.burnin)
+        0     @printf(io, "  %-15s : %d\n", "Seed", ex.seed)
+      768     println(io, "──────────────────────────────────────────────────────────")
+        0     println(io, "  Parameters Type: ", typeof(ex.params))
+        0     println(io, "  Drift Function:  ", ex.drift)
+        0     println(io, "  Noise Function:  ", ex.noise)
+      160     println(io, "──────────────────────────────────────────────────────────")
+        - end
+        - 
+        - # constructor 
+        0 function SDEExperiment(drift, noise, params; dim, kwargs...)
+        -     if !isbits(params)
+        -         throw(ArgumentError("Params must be isbits for GPU compatibility. Received: $(typeof(params))"))
+        -     end
+     4560     return SDEExperiment(; drift=drift, noise=noise, params=params, dim=dim, kwargs...)
+        - end
+        - 
+        - function run_experiment(sde_exp::SDEExperiment)
+        - 
+      192     display(sde_exp)
+        0     CUDA.allowscalar(false)
+        -     
+        -     # burnin
+    27904     @info "Starting Burn-in Phase" details="""
+        -     Gathering an ensemble of initial conditions 
+        -     distributed according to the invariant measure.
+        -     """ burnin_time=sde_exp.burnin
+        -     
+        - 
+     2320     u0 = rand(SVector{sde_exp.dim, Float32})
+      320     prob = SDEProblem(sde_exp.drift, sde_exp.noise, u0, (0.0f0, sde_exp.burnin), sde_exp.params)
+     1280     ensemble_prob = EnsembleProblem(prob, 
+  3280096         prob_func = (prob, ctx) -> 
+        -             remake(prob; u0 = rand(SVector{sde_exp.dim, Float32})),
+        0             output_func = (sol, ctx) -> (sol.u[end], false) 
+        -     )
+        - 
+        0     time_0 = time()
+       80     sol = solve(ensemble_prob, SOSRI(), EnsembleGPUArray(CUDA.CUDABackend()), 
+        -         trajectories = sde_exp.n_traj)
+        -     # Initial conditions roughly distributed according to the invariant measures
+        0     inits = sol.u
+        0     time_elapsed = time() - time_0 
+    22000     @info "Time taken on burnin: " time=time_elapsed
+        - 
+        -     # Generate trajectories
+    29360     @info "Generating Data" details="""
+        -     Simulating an ensemble of trajectories.
+        -     """ end_time=sde_exp.T_end dt=sde_exp.dt
+        - 
+      320     prob = SDEProblem(sde_exp.drift, sde_exp.noise, u0, (0.0f0, sde_exp.T_end), sde_exp.params)
+  1344672     prob_func = (prob, ctx) -> remake(prob, u0 = inits[ctx.sim_id])
+      832     ensemble_prob = EnsembleProblem(prob, prob_func = prob_func)
+        -     
+        0     time_0 = time()
+      160     sol = solve(ensemble_prob, SOSRI(), EnsembleGPUArray(CUDA.CUDABackend()), 
+        -         trajectories = sde_exp.n_traj, saveat = sde_exp.dt)
+        0     time_elapsed = time() - time_0 
+    22000     @info "Time taken on simulation: " time=time_elapsed
+        -     
+      320     date_time = now()
+     3560     save_dir = joinpath(pwd(), "data")
+     3200     mkpath(save_dir)
+      160     cpu_data = Array.(sol.u) # Explodes memory????
+        - 
+        0     if !isnothing(sde_exp.fname)
+        0         filename=joinpath(save_dir, sde_exp.fname)
+        - 
+        0         @info "Saving data" details="""
+        -         Date = $(date_time)
+        -         Filename = $(filename)
+        -         """ date_time=date_time filename=sde_exp.fname
+        - 
+        0         timesteps = sol[1].t
+        0         jldsave(filename; sde_exp, cpu_data, timesteps)
+        -     end
+        - 
+        0     return cpu_data
+        - end
+        - 
+        - 
+        - end;
