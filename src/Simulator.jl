@@ -50,6 +50,14 @@ end
 function burnin(sde_exp::SDEExperiment, burnin_time)
     display(sde_exp)
     CUDA.allowscalar(false)
+
+    if CUDA.functional()
+        @info "NVIDIA GPU detected. Running simulations via CUDA acceleration."
+        ensemble_backend = EnsembleGPUArray(CUDA.CUDABackend())
+    else
+        @warn "No NVIDIA GPU found. Falling back to multi-threaded CPU parallelization."
+        ensemble_backend = EnsembleThreads()
+    end
     
     # burnin
     @info "Starting Burn-in Phase" details="""
@@ -67,8 +75,8 @@ function burnin(sde_exp::SDEExperiment, burnin_time)
     )
 
     time_0 = time()
-    sol = solve(ensemble_prob, SOSRI(), EnsembleGPUArray(CUDA.CUDABackend()), 
-        trajectories = sde_exp.n_traj)
+    sol = solve(ensemble_prob, SOSRI(), ensemble_backend, 
+        trajectories = sde_exp.n_traj, adaptive = false)
     # Initial conditions roughly distributed according to the invariant measures
     time_elapsed = time() - time_0 
     @info "Time taken on burnin: " time=time_elapsed
@@ -87,13 +95,21 @@ function run_experiment(sde_exp::SDEExperiment, inits)
     Simulating an ensemble of trajectories.
     """ end_time=sde_exp.T_end dt=sde_exp.dt
 
+    if CUDA.functional()
+        @info "NVIDIA GPU detected. Running simulations via CUDA acceleration."
+        ensemble_backend = EnsembleGPUArray(CUDA.CUDABackend())
+    else
+        @warn "No NVIDIA GPU found. Falling back to multi-threaded CPU parallelization."
+        ensemble_backend = EnsembleThreads()
+    end
+
     prob = SDEProblem(sde_exp.drift, sde_exp.noise, inits[1], (0.0f0, sde_exp.T_end), sde_exp.params)
     prob_func = (prob, ctx) -> remake(prob, u0 = inits[ctx.sim_id])
     ensemble_prob = EnsembleProblem(prob, prob_func = prob_func)
     
     time_0 = time()
-    sol = solve(ensemble_prob, SOSRI(), EnsembleGPUArray(CUDA.CUDABackend()), 
-        trajectories = sde_exp.n_traj, saveat = sde_exp.dt)
+    sol = solve(ensemble_prob, SOSRI(), ensemble_backend, 
+        trajectories = sde_exp.n_traj, saveat = sde_exp.dt, adaptive = false)
     time_elapsed = time() - time_0 
     @info "Time taken on simulation: " time=time_elapsed
     
