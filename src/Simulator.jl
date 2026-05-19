@@ -76,7 +76,7 @@ function burnin(sde_exp::SDEExperiment, burnin_time)
 
     time_0 = time()
     sol = solve(ensemble_prob, SOSRI(), ensemble_backend, 
-        trajectories = sde_exp.n_traj, adaptive = false)
+        trajectories = sde_exp.n_traj, adaptive = false, dt=sde_exp.dt)
     # Initial conditions roughly distributed according to the invariant measures
     time_elapsed = time() - time_0 
     @info "Time taken on burnin: " time=time_elapsed
@@ -109,7 +109,7 @@ function run_experiment(sde_exp::SDEExperiment, inits)
     
     time_0 = time()
     sol = solve(ensemble_prob, SOSRI(), ensemble_backend, 
-        trajectories = sde_exp.n_traj, saveat = sde_exp.dt, adaptive = false)
+        trajectories = sde_exp.n_traj, saveat = sde_exp.dt, adaptive = false, dt=sde_exp.dt)
     time_elapsed = time() - time_0 
     @info "Time taken on simulation: " time=time_elapsed
     
